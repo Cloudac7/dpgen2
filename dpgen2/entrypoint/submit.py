@@ -136,6 +136,7 @@ def make_concurrent_learning_op(
     collect_data_config: dict = default_config,
     cl_step_config: dict = default_config,
     upload_python_packages: Optional[List[os.PathLike]] = None,
+    valid_data: Optional[S3Artifact] = None,
 ):
     if train_style in ("dp", "dp-dist"):
         prep_run_train_op = PrepRunDPTrain(
@@ -145,6 +146,7 @@ def make_concurrent_learning_op(
             prep_config=prep_train_config,
             run_config=run_train_config,
             upload_python_packages=upload_python_packages,
+            valid_data=valid_data,
         )
     else:
         raise RuntimeError(f"unknown train_style {train_style}")
@@ -305,6 +307,7 @@ def make_finetune_step(
     init_models,
     init_data,
     iter_data,
+    valid_data=None,
 ):
     finetune_optional_parameter = {
         "mixed_type": config["inputs"]["mixed_type"],
@@ -319,6 +322,7 @@ def make_finetune_step(
         run_config=run_train_config,
         upload_python_packages=upload_python_packages,
         finetune=True,
+        valid_data=valid_data,
     )
     finetune_step = Step(
         "finetune-step",
@@ -384,6 +388,14 @@ def workflow_concurrent_learning(
         ]
         upload_python_packages = _upload_python_packages
 
+    valid_data = config["inputs"]["valid_data_sys"]
+    if valid_data is not None:
+        valid_data_prefix = config["inputs"]["valid_data_prefix"]
+        if valid_data_prefix is not None:
+            valid_data = [os.path.join(valid_data_prefix, ii) for ii in valid_data]
+        if isinstance(valid_data, str):
+            valid_data = expand_sys_str(valid_data)
+        valid_data = upload_artifact(valid_data)
     concurrent_learning_op = make_concurrent_learning_op(
         train_style,
         explore_style,
@@ -398,6 +410,7 @@ def workflow_concurrent_learning(
         collect_data_config=collect_data_config,
         cl_step_config=cl_step_config,
         upload_python_packages=upload_python_packages,
+        valid_data=valid_data,
     )
     scheduler = make_naive_exploration_scheduler(config)
 
@@ -418,7 +431,7 @@ def workflow_concurrent_learning(
             lmp_config["teacher_model_path"]
         ), f"No such file: {lmp_config['teacher_model_path']}"
         lmp_config["teacher_model_path"] = BinaryFileInput(
-            lmp_config["teacher_model_path"], "pb"
+            lmp_config["teacher_model_path"]
         )
 
     fp_config = {}
@@ -427,7 +440,7 @@ def workflow_concurrent_learning(
 
     fp_config["inputs"] = fp_inputs
     fp_config["run"] = config["fp"]["run_config"]
-    if fp_style == "deepmd":
+    if fp_style in ["deepmd", "deepmd_pt"]:
         assert (
             "teacher_model_path" in fp_config["run"]
         ), f"Cannot find 'teacher_model_path' in config['fp']['run_config'] when fp_style == 'deepmd'"
@@ -435,15 +448,36 @@ def workflow_concurrent_learning(
             fp_config["run"]["teacher_model_path"]
         ), f"No such file: {fp_config['run']['teacher_model_path']}"
         fp_config["run"]["teacher_model_path"] = BinaryFileInput(
-            fp_config["run"]["teacher_model_path"], "pb"
+            fp_config["run"]["teacher_model_path"]
         )
 
-    init_data_prefix = config["inputs"]["init_data_prefix"]
-    init_data = config["inputs"]["init_data_sys"]
-    if init_data_prefix is not None:
-        init_data = [os.path.join(init_data_prefix, ii) for ii in init_data]
-    if isinstance(init_data, str):
-        init_data = expand_sys_str(init_data)
+    multitask = config["inputs"]["multitask"]
+    if multitask:
+        head = config["inputs"]["head"]
+        multi_init_data = config["inputs"]["multi_init_data"]
+        init_data = []
+        multi_init_data_idx = {}
+        for k, v in multi_init_data.items():
+            sys = v["sys"]
+            if isinstance(sys, str):
+                sys = expand_sys_str(sys)
+            if v["prefix"] is not None:
+                sys = [os.path.join(v["prefix"], ii) for ii in sys]
+            istart = len(init_data)
+            init_data += sys
+            iend = len(init_data)
+            multi_init_data_idx[k] = list(range(istart, iend))
+        train_config["multitask"] = True
+        train_config["head"] = head
+        train_config["multi_init_data_idx"] = multi_init_data_idx
+        lmp_config["head"] = head
+    else:
+        init_data_prefix = config["inputs"]["init_data_prefix"]
+        init_data = config["inputs"]["init_data_sys"]
+        if init_data_prefix is not None:
+            init_data = [os.path.join(init_data_prefix, ii) for ii in init_data]
+        if isinstance(init_data, str):
+            init_data = expand_sys_str(init_data)
     init_data = upload_artifact(init_data)
     iter_data = upload_artifact([])
     if init_models_paths is not None:
@@ -468,6 +502,7 @@ def workflow_concurrent_learning(
             init_models,
             init_data,
             iter_data,
+            valid_data=valid_data,
         )
 
         init_models = finetune_step.outputs.artifacts["models"]

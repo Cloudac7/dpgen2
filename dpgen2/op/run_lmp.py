@@ -116,6 +116,7 @@ class RunLmp(OP):
         command = config["command"]
         teacher_model: Optional[BinaryFileInput] = config["teacher_model_path"]
         shuffle_models: Optional[bool] = config["shuffle_models"]
+        impl = config.get("impl", "tensorflow")
         task_name = ip["task_name"]
         task_path = ip["task_path"]
         models = ip["models"]
@@ -140,7 +141,28 @@ class RunLmp(OP):
             # link models
             for idx, mm in enumerate(model_files):
                 mname = model_name_pattern % (idx)
-                Path(mname).symlink_to(mm)
+                if impl == "tensorflow":
+                    Path(mname).symlink_to(mm)
+                elif impl == "pytorch":
+                    # freeze model
+                    freeze_args = "-o %s" % mname
+                    if config.get("head") is not None:
+                        freeze_args += " --head %s" % config["head"]
+                    freeze_cmd = "dp_pt freeze %s %s" % (mm, freeze_args)
+                    ret, out, err = run_command(freeze_cmd, shell=True)
+                    if ret != 0:
+                        logging.error("".join((
+                            "freeze failed\n",
+                            "command was",
+                            freeze_cmd,
+                            "out msg",
+                            out,
+                            "\n",
+                            "err msg",
+                            err,
+                            "\n",
+                        )))
+                        raise TransientError("freeze failed")
 
             if teacher_model is not None:
                 add_teacher_model(lmp_input_name)
@@ -188,6 +210,8 @@ class RunLmp(OP):
         doc_lmp_cmd = "The command of LAMMPS"
         doc_teacher_model = "The teacher model in `Knowledge Distillation`"
         doc_shuffle_models = "Randomly pick a model from the group of models to drive theexploration MD simulation"
+        doc_impl = "The implementation of DP. It can be 'tensorflow' or 'pytorch'. 'tensorflow' for default."
+        doc_head = "Select a head from multitask"
         return [
             Argument("command", str, optional=True, default="lmp", doc=doc_lmp_cmd),
             Argument(
@@ -204,6 +228,8 @@ class RunLmp(OP):
                 default=False,
                 doc=doc_shuffle_models,
             ),
+            Argument("impl", str, optional=True, default="tensorflow", doc=doc_impl),
+            Argument("head", str, optional=True, default=None, doc=doc_head),
         ]
 
     @staticmethod
